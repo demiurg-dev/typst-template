@@ -1,0 +1,81 @@
+name: Format, lint, test & audit
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 0 * * *"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  format:
+    name: Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: rustup toolchain install nightly --component rustfmt --profile minimal
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install cargo-sort --locked
+      - run: cargo sort -w -g -o package,dependencies,features --check
+      - run: cargo +nightly fmt --check
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --no-deps --all-targets --all-features -- -D warnings
+      - run: cargo clippy -p typst-template --no-deps --no-default-features -- -D warnings
+      - run: cargo clippy -p typst-template --no-deps --no-default-features --features time -- -D warnings
+      - run: cargo clippy -p typst-template --no-deps --no-default-features --features time-tz -- -D warnings
+      - run: cargo doc --all-features --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  test:
+    name: Test (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # chrono clock backend
+          - name: all-features
+            flags: --all-features
+          # no time backend (datetime.today disabled by default)
+          - name: no-time-backend
+            flags: --no-default-features --features derive
+          # time clock backend (chrono off)
+          - name: time-backend
+            flags: --no-default-features --features derive,time,time-tz
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.name }}
+      - run: cargo test ${{ matrix.flags }}
+
+  audit:
+    name: Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - run: cargo audit
