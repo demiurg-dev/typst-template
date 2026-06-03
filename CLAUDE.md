@@ -42,6 +42,7 @@ tested examples.
 ## Git
 
 - Never add a `Co-Authored-By` (or any AI attribution) trailer to commits.
+- Never amend or rewrite existing commits unless explicitly asked.
 
 ## Working with sub-agents
 

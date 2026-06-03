@@ -20,10 +20,9 @@ use crate::value::{ToDict, ToValue};
 
 /// A long-lived, cheaply cloneable Typst world.
 ///
-/// Holds the project root and the loaded font set. Loading fonts is the
-/// expensive part of setting up Typst, so build a `WorldBase` once and derive a
-/// [`ConcreteWorld`] from it for every document via [`concrete`](Self::concrete).
-/// Cloning shares the underlying fonts through an [`Arc`].
+/// Holds the project root and the loaded font set. Build a `WorldBase` once and
+/// derive a [`ConcreteWorld`] from it for each document via
+/// [`concrete`](Self::concrete). Cloning shares the fonts through an [`Arc`].
 #[derive(Clone)]
 #[must_use]
 pub struct WorldBase {
@@ -179,9 +178,8 @@ impl ConcreteWorldBuilder {
 
     /// Pins `datetime.today()` to a fixed value.
     ///
-    /// Only answers offset-less (`auto`) requests; a `datetime.today(offset: N)`
-    /// call returns nothing, since a fixed value can't honor a requested
-    /// time-zone.
+    /// Answers only offset-less (`auto`) requests; `datetime.today(offset: N)`
+    /// returns nothing.
     pub fn today(mut self, today: Datetime) -> Self {
         self.today = Today::Fixed(today);
         self
@@ -190,10 +188,9 @@ impl ConcreteWorldBuilder {
     /// Makes `datetime.today()` read the system clock, treating "local" as the
     /// operating system's time zone.
     ///
-    /// With the `time` backend (i.e. `time` enabled and `chrono` not), the OS
-    /// offset can't be read safely in a multithreaded process, so "local" falls
-    /// back to UTC; use [`today_system_in`](Self::today_system_in) for a
-    /// specific zone.
+    /// With the `time` backend, "local" falls back to UTC when the OS offset is
+    /// unavailable (e.g. in a multithreaded process); use
+    /// [`today_system_in`](Self::today_system_in) for a specific zone.
     #[cfg(any(feature = "chrono", feature = "time"))]
     #[cfg_attr(docsrs, doc(cfg(any(feature = "chrono", feature = "time"))))]
     pub fn today_system(mut self) -> Self {
@@ -354,7 +351,7 @@ impl Today {
     fn resolve(&self, offset: Option<i64>) -> Option<Datetime> {
         match self {
             Today::Disabled => None,
-            // A fixed value can't honor a requested time-zone offset.
+            // A fixed value answers only offset-less requests.
             Today::Fixed(today) => match offset {
                 None => Some(*today),
                 Some(_) => None,
@@ -463,9 +460,8 @@ fn local_now() -> Option<Datetime> {
     )
 }
 
-/// The current time via `time`. `time` refuses to read the OS-local offset in a
-/// multithreaded process (it returns an error rather than risk unsoundness), so
-/// this falls back to UTC when the local offset can't be determined. Use
+/// The current time via `time`. Falls back to UTC when the OS-local offset is
+/// unavailable (e.g. in a multithreaded process); use
 /// [`today_system_in`](ConcreteWorldBuilder::today_system_in) for a specific
 /// zone.
 #[cfg(all(feature = "time", not(feature = "chrono")))]
@@ -476,8 +472,7 @@ fn local_now() -> Option<Datetime> {
 }
 
 /// The current time at a fixed UTC offset (in hours). Uses `chrono` if enabled,
-/// otherwise `time`. Returns `None` for an offset so large the arithmetic would
-/// overflow, rather than panicking (the offset comes from the template).
+/// otherwise `time`. Returns `None` if the offset is too large to apply.
 #[cfg(feature = "chrono")]
 fn offset_now(hours: i64) -> Option<Datetime> {
     use chrono::{Datelike, Duration, Timelike, Utc};

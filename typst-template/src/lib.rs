@@ -6,12 +6,11 @@
 //! the Rust-to-Typst value conversion, with optional `chrono`, `time`,
 //! `rust_decimal`, `serde_json`, and `uuid` support.
 //!
-//! Rendering is split into two pieces so repeated generation stays cheap:
+//! Rendering uses two parts:
 //!
-//! - [`WorldBase`] — built once; loads fonts (the expensive step) and roots file access at a
-//!   directory.
+//! - [`WorldBase`] — built once; loads fonts and roots file access at a directory.
 //! - [`ConcreteWorld`] — one per document; attaches this generation's `sys.inputs` and any virtual
-//!   in-memory files (images, generated assets, …) without touching disk.
+//!   in-memory files (images, generated assets, …).
 //!
 //! # Example
 //!
@@ -68,9 +67,9 @@
 //! and [`today_system_in`](ConcreteWorldBuilder::today_system_in) (with
 //! `chrono-tz` or `time-tz`) pins "local" to a DST-aware named zone.
 //!
-//! Note: the `time` backend can't read the OS-local offset in a multithreaded
-//! process, so `today_system` falls back to UTC there — prefer a named zone (or
-//! `chrono`) when the exact local zone matters.
+//! Note: with the `time` backend, `today_system` falls back to UTC when the
+//! OS-local offset is unavailable (e.g. in a multithreaded process); use a named
+//! zone (or `chrono`) for a specific local zone.
 //!
 //! # Features
 //!

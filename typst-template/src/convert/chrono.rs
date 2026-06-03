@@ -4,8 +4,7 @@ use typst::foundations::{Datetime, Value};
 use crate::ToValue;
 use crate::convert::datetime;
 
-// Dates outside Typst's representable range (years beyond ±9999) convert to
-// `none` rather than panicking.
+// Dates outside Typst's range (years beyond ±9999) convert to `none`.
 fn from_naive(value: &NaiveDateTime) -> Value {
     datetime(
         value.year(),
