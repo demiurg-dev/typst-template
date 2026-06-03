@@ -1,0 +1,43 @@
+[package]
+name = "typst-template"
+description = "Generate PDFs with Typst straight from your Rust types: derive Typst inputs from structs and render templates, on a reusable world for cheap repeated generation."
+categories = ["template-engine", "rendering"]
+keywords = ["typst", "pdf", "template", "document"]
+readme = "README.md"
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+version.workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[dependencies]
+typst.workspace = true
+typst-kit.workspace = true
+typst-pdf.workspace = true
+
+# Optional: derive macro
+typst-template-derive = { workspace = true, optional = true }
+
+# Optional: ecosystem integrations
+chrono = { workspace = true, optional = true }
+chrono-tz = { workspace = true, optional = true }
+rust_decimal = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+time = { workspace = true, optional = true }
+time-tz = { workspace = true, optional = true }
+uuid = { workspace = true, optional = true }
+
+[features]
+default = ["derive"]
+chrono = ["dep:chrono"]
+chrono-tz = ["chrono", "dep:chrono-tz"]
+derive = ["dep:typst-template-derive"]
+rust_decimal = ["dep:rust_decimal"]
+serde_json = ["dep:serde_json"]
+time = ["dep:time"]
+time-tz = ["dep:time-tz", "time"]
+uuid = ["dep:uuid"]

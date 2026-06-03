@@ -1,0 +1,5 @@
+/target
+*.pdf
+
+# Claude Code per-user local settings (CLAUDE.md is committed; this isn't)
+.claude/settings.local.json
