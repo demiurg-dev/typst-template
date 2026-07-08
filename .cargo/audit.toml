@@ -2,13 +2,17 @@
 
 [advisories]
 # Two quadratic/unbounded-allocation DoS advisories in `quick-xml`, both fixed
-# in 0.41.0. We only reach `quick-xml` transitively through `typst` (via
-# `citationberg`/`hayagriva` and `plist`/`syntect`), which pin it to `^0.38`
-# and `^0.39`; 0.41 is unreachable without a breaking `typst` 0.15 bump. The
-# DoS requires parsing attacker-crafted XML, which this crate never does — it
-# renders PDFs from trusted templates and Rust data. Revisit when we move to
-# typst 0.15.
+# in 0.41.0. We reach `quick-xml` only transitively through `typst`, via
+# `citationberg` (bibliography parsing, pulled in by `hayagriva`), which pins
+# `quick-xml` to `^0.38`. `citationberg` 0.7.0 — the newest release, required
+# by the `hayagriva` that typst 0.15 depends on — has no `quick-xml` 0.41 build
+# yet, so we cannot resolve past it. (The other former source, `plist` via
+# `syntect`, is now on `quick-xml` 0.41 and is clean.)
+#
+# The DoS requires parsing attacker-crafted XML, which this crate never does —
+# it renders PDFs from trusted templates and Rust data. Revisit (and remove
+# these entries) once `citationberg` ships a `quick-xml` 0.41 release.
 ignore = [
-    "RUSTSEC-2026-0194", # quick-xml: quadratic CPU on duplicate attribute names
-    "RUSTSEC-2026-0195", # quick-xml: unbounded namespace-declaration allocation
+    "RUSTSEC-2026-0194", # quick-xml <0.41: quadratic CPU on duplicate attribute names
+    "RUSTSEC-2026-0195", # quick-xml <0.41: unbounded namespace-declaration allocation
 ]

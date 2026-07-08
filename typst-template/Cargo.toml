@@ -17,6 +17,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 [dependencies]
 typst.workspace = true
 typst-kit.workspace = true
+typst-layout.workspace = true
 typst-pdf.workspace = true
 
 # Optional: derive macro

@@ -165,4 +165,4 @@ pub use world::{ConcreteWorld, ConcreteWorldBuilder, WorldBase, WorldBaseConfig}
 // Re-export the Typst crates and the handful of types that appear in this
 // crate's public API, so downstream users don't need to depend on them
 // directly or match versions by hand.
-pub use {typst, typst_pdf};
+pub use {typst, typst_layout, typst_pdf};

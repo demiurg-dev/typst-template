@@ -7,13 +7,13 @@ use std::sync::Arc;
 use std::{fmt, fs};
 
 use typst::diag::{FileError, FileResult, SourceResult, Warned};
-use typst::foundations::{Bytes, Datetime, Dict, Str};
-use typst::layout::PagedDocument;
-use typst::syntax::{FileId, Source, VirtualPath};
+use typst::foundations::{Bytes, Datetime, Dict, Duration, Str};
+use typst::syntax::{FileId, RootedPath, Source, VirtualPath, VirtualRoot};
 use typst::text::{Font, FontBook};
 use typst::utils::LazyHash;
 use typst::{Library, LibraryExt, World};
-use typst_kit::fonts::{FontSearcher, FontSlot, Fonts};
+use typst_kit::fonts::{self, FontStore};
+use typst_layout::PagedDocument;
 use typst_pdf::{PdfOptions, pdf};
 
 use crate::value::{ToDict, ToValue};
@@ -31,8 +31,7 @@ pub struct WorldBase {
 
 struct WorldBaseInner {
     root: PathBuf,
-    book: LazyHash<FontBook>,
-    fonts: Vec<FontSlot>,
+    fonts: FontStore,
 }
 
 impl fmt::Debug for WorldBase {
@@ -88,11 +87,18 @@ impl WorldBaseConfig {
 
     /// Builds the base, searching for fonts now.
     pub fn build(self) -> WorldBase {
-        let mut searcher = FontSearcher::new();
-        searcher.include_system_fonts(self.system_fonts);
-        searcher.include_embedded_fonts(self.embedded_fonts);
-        let Fonts { book, fonts } = searcher.search_with(&self.font_paths);
-        let inner = WorldBaseInner { root: self.root, book: LazyHash::new(book), fonts };
+        // Priority follows load order: font paths, then system, then embedded.
+        let mut store = FontStore::new();
+        for path in &self.font_paths {
+            store.extend(fonts::scan(path));
+        }
+        if self.system_fonts {
+            store.extend(fonts::system());
+        }
+        if self.embedded_fonts {
+            store.extend(fonts::embedded());
+        }
+        let inner = WorldBaseInner { root: self.root, fonts: store };
         WorldBase { inner: Arc::new(inner) }
     }
 }
@@ -123,8 +129,8 @@ impl WorldBaseInner {
     fn load_file(&self, id: FileId) -> FileResult<Vec<u8>> {
         let path = id
             .vpath()
-            .resolve(&self.root)
-            .ok_or(FileError::AccessDenied)?;
+            .realize(&self.root)
+            .map_err(|_| FileError::AccessDenied)?;
         // TODO: Cache reads in the base and re-validate against mtime on the
         // next request. See TODO.md ("Disk file read cache").
         fs::read(&path).map_err(|err| match err.kind() {
@@ -291,7 +297,7 @@ impl World for ConcreteWorld {
     }
 
     fn book(&self) -> &LazyHash<FontBook> {
-        &self.base.book
+        self.base.fonts.book()
     }
 
     fn main(&self) -> FileId {
@@ -309,11 +315,12 @@ impl World for ConcreteWorld {
     }
 
     fn font(&self, index: usize) -> Option<Font> {
-        self.base.fonts.get(index).and_then(FontSlot::get)
+        self.base.fonts.font(index)
     }
 
-    fn today(&self, offset: Option<i64>) -> Option<Datetime> {
-        self.today.resolve(offset)
+    fn today(&self, offset: Option<Duration>) -> Option<Datetime> {
+        // typst treats an integer `datetime.today` offset as a duration in hours.
+        self.today.resolve(offset.map(|d| d.hours() as i64))
     }
 }
 
@@ -498,5 +505,6 @@ fn offset_now(hours: i64) -> Option<Datetime> {
 }
 
 fn file_id(path: impl AsRef<Path>) -> FileId {
-    FileId::new(None, VirtualPath::new(path))
+    let vpath = VirtualPath::new(path.as_ref().to_string_lossy()).expect("valid virtual path");
+    FileId::new(RootedPath::new(VirtualRoot::Project, vpath))
 }
