@@ -1,0 +1,14 @@
+# Configuration for `cargo audit` (see the `audit` job in CI).
+
+[advisories]
+# Two quadratic/unbounded-allocation DoS advisories in `quick-xml`, both fixed
+# in 0.41.0. We only reach `quick-xml` transitively through `typst` (via
+# `citationberg`/`hayagriva` and `plist`/`syntect`), which pin it to `^0.38`
+# and `^0.39`; 0.41 is unreachable without a breaking `typst` 0.15 bump. The
+# DoS requires parsing attacker-crafted XML, which this crate never does — it
+# renders PDFs from trusted templates and Rust data. Revisit when we move to
+# typst 0.15.
+ignore = [
+    "RUSTSEC-2026-0194", # quick-xml: quadratic CPU on duplicate attribute names
+    "RUSTSEC-2026-0195", # quick-xml: unbounded namespace-declaration allocation
+]
