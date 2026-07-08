@@ -66,6 +66,29 @@ fn today_huge_offset_does_not_panic() {
     assert!(world.compile().output.is_err());
 }
 
+#[cfg(any(feature = "chrono", feature = "time"))]
+#[test]
+fn today_offset_keeps_sub_hour_precision() {
+    // A sub-hour offset (e.g. UTC+5:30) must not be truncated to whole hours.
+    let src = concat!(
+        "#let a = datetime.today(offset: duration(hours: 1))\n",
+        "#let b = datetime.today(offset: duration(hours: 1, minutes: 30))\n",
+        "#assert(a != b, message: \"sub-hour offset was truncated\")",
+    );
+    let world = base().concrete("main.typ").file("main.typ", src).build();
+    assert!(world.compile().output.is_ok(), "sub-hour offset should be preserved");
+}
+
+#[test]
+fn path_normalizes_separators_and_dot_segments() {
+    // Backslashes and `.`/`..` resolve to the same virtual file instead of
+    // panicking or escaping the root.
+    for main in ["sub/doc.typ", "sub\\doc.typ", "x/../sub/doc.typ", "./sub/doc.typ"] {
+        let world = base().concrete(main).file("sub/doc.typ", "hi").build();
+        assert!(world.compile().output.is_ok(), "path {main:?} should resolve to sub/doc.typ");
+    }
+}
+
 #[test]
 fn today_fixed_rejects_explicit_offset() {
     use typst_template::typst::foundations::Datetime;
