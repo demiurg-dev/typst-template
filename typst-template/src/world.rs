@@ -7,13 +7,13 @@ use std::sync::Arc;
 use std::{fmt, fs};
 
 use typst::diag::{FileError, FileResult, SourceResult, Warned};
-use typst::foundations::{Bytes, Datetime, Dict, Str};
-use typst::layout::PagedDocument;
-use typst::syntax::{FileId, Source, VirtualPath};
+use typst::foundations::{Bytes, Datetime, Dict, Duration, Str};
+use typst::syntax::{FileId, RootedPath, Source, VirtualPath, VirtualRoot};
 use typst::text::{Font, FontBook};
 use typst::utils::LazyHash;
 use typst::{Library, LibraryExt, World};
-use typst_kit::fonts::{FontSearcher, FontSlot, Fonts};
+use typst_kit::fonts::{self, FontStore};
+use typst_layout::PagedDocument;
 use typst_pdf::{PdfOptions, pdf};
 
 use crate::value::{ToDict, ToValue};
@@ -31,8 +31,7 @@ pub struct WorldBase {
 
 struct WorldBaseInner {
     root: PathBuf,
-    book: LazyHash<FontBook>,
-    fonts: Vec<FontSlot>,
+    fonts: FontStore,
 }
 
 impl fmt::Debug for WorldBase {
@@ -88,11 +87,18 @@ impl WorldBaseConfig {
 
     /// Builds the base, searching for fonts now.
     pub fn build(self) -> WorldBase {
-        let mut searcher = FontSearcher::new();
-        searcher.include_system_fonts(self.system_fonts);
-        searcher.include_embedded_fonts(self.embedded_fonts);
-        let Fonts { book, fonts } = searcher.search_with(&self.font_paths);
-        let inner = WorldBaseInner { root: self.root, book: LazyHash::new(book), fonts };
+        // Priority follows load order: font paths, then system, then embedded.
+        let mut store = FontStore::new();
+        for path in &self.font_paths {
+            store.extend(fonts::scan(path));
+        }
+        if self.system_fonts {
+            store.extend(fonts::system());
+        }
+        if self.embedded_fonts {
+            store.extend(fonts::embedded());
+        }
+        let inner = WorldBaseInner { root: self.root, fonts: store };
         WorldBase { inner: Arc::new(inner) }
     }
 }
@@ -123,8 +129,8 @@ impl WorldBaseInner {
     fn load_file(&self, id: FileId) -> FileResult<Vec<u8>> {
         let path = id
             .vpath()
-            .resolve(&self.root)
-            .ok_or(FileError::AccessDenied)?;
+            .realize(&self.root)
+            .map_err(|_| FileError::AccessDenied)?;
         // TODO: Cache reads in the base and re-validate against mtime on the
         // next request. See TODO.md ("Disk file read cache").
         fs::read(&path).map_err(|err| match err.kind() {
@@ -291,7 +297,7 @@ impl World for ConcreteWorld {
     }
 
     fn book(&self) -> &LazyHash<FontBook> {
-        &self.base.book
+        self.base.fonts.book()
     }
 
     fn main(&self) -> FileId {
@@ -309,11 +315,13 @@ impl World for ConcreteWorld {
     }
 
     fn font(&self, index: usize) -> Option<Font> {
-        self.base.fonts.get(index).and_then(FontSlot::get)
+        self.base.fonts.font(index)
     }
 
-    fn today(&self, offset: Option<i64>) -> Option<Datetime> {
-        self.today.resolve(offset)
+    fn today(&self, offset: Option<Duration>) -> Option<Datetime> {
+        // typst treats an integer `datetime.today` offset as hours, but a caller
+        // may pass a finer duration (e.g. UTC+5:30), so carry full seconds.
+        self.today.resolve(offset.map(|d| d.seconds() as i64))
     }
 }
 
@@ -348,23 +356,23 @@ impl Default for Today {
 }
 
 impl Today {
-    fn resolve(&self, offset: Option<i64>) -> Option<Datetime> {
+    fn resolve(&self, offset_secs: Option<i64>) -> Option<Datetime> {
         match self {
             Today::Disabled => None,
             // A fixed value answers only offset-less requests.
-            Today::Fixed(today) => match offset {
+            Today::Fixed(today) => match offset_secs {
                 None => Some(*today),
                 Some(_) => None,
             },
             #[cfg(any(feature = "chrono", feature = "time"))]
-            Today::SystemLocal => match offset {
-                Some(hours) => offset_now(hours),
+            Today::SystemLocal => match offset_secs {
+                Some(secs) => offset_now(secs),
                 None => local_now(),
             },
             #[cfg(any(feature = "chrono-tz", feature = "time-tz"))]
             // An explicit offset overrides the configured zone.
-            Today::SystemZone(zone) => match offset {
-                Some(hours) => offset_now(hours),
+            Today::SystemZone(zone) => match offset_secs {
+                Some(secs) => offset_now(secs),
                 None => zone.now(),
             },
         }
@@ -471,13 +479,13 @@ fn local_now() -> Option<Datetime> {
     crate::convert::datetime(now.year(), u8::from(now.month()), now.day(), now.hour(), now.minute(), now.second())
 }
 
-/// The current time at a fixed UTC offset (in hours). Uses `chrono` if enabled,
-/// otherwise `time`. Returns `None` if the offset is too large to apply.
+/// The current time at a fixed UTC offset (in seconds). Uses `chrono` if
+/// enabled, otherwise `time`. Returns `None` if the offset is too large to apply.
 #[cfg(feature = "chrono")]
-fn offset_now(hours: i64) -> Option<Datetime> {
+fn offset_now(secs: i64) -> Option<Datetime> {
     use chrono::{Datelike, Duration, Timelike, Utc};
     let now = Utc::now()
-        .checked_add_signed(Duration::try_hours(hours)?)?
+        .checked_add_signed(Duration::try_seconds(secs)?)?
         .naive_utc();
     crate::convert::datetime(
         now.year(),
@@ -490,13 +498,30 @@ fn offset_now(hours: i64) -> Option<Datetime> {
 }
 
 #[cfg(all(feature = "time", not(feature = "chrono")))]
-fn offset_now(hours: i64) -> Option<Datetime> {
+fn offset_now(secs: i64) -> Option<Datetime> {
     use time::OffsetDateTime;
-    let seconds = hours.checked_mul(3600)?;
-    let now = OffsetDateTime::now_utc().checked_add(time::Duration::seconds(seconds))?;
+    let now = OffsetDateTime::now_utc().checked_add(time::Duration::seconds(secs))?;
     crate::convert::datetime(now.year(), u8::from(now.month()), now.day(), now.hour(), now.minute(), now.second())
 }
 
+// Builds a project-root-relative file id. Typst virtual paths are
+// `/`-separated; accept the platform separator too (so `PathBuf`s built on
+// Windows work) and resolve `.`/`..` so a stray `..` clamps at the root instead
+// of erroring.
 fn file_id(path: impl AsRef<Path>) -> FileId {
-    FileId::new(None, VirtualPath::new(path))
+    let raw = path.as_ref().to_string_lossy();
+    let mut segments: Vec<&str> = Vec::new();
+    for segment in raw.split(['/', '\\']) {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                segments.pop();
+            }
+            normal => segments.push(normal),
+        }
+    }
+    // Only normal segments remain, so this cannot escape the root or hit a
+    // backslash — the two ways `VirtualPath::new` can fail.
+    let vpath = VirtualPath::new(segments.join("/")).expect("normalized path is a valid vpath");
+    FileId::new(RootedPath::new(VirtualRoot::Project, vpath))
 }

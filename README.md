@@ -79,6 +79,16 @@ requests; an explicit `datetime.today(offset: N)` returns nothing.
 - `serde_json` — `ToValue`/`ToDict` for `serde_json` values.
 - `uuid` — `ToValue` for `uuid::Uuid`.
 
+## Typst compatibility
+
+Each release targets a specific Typst version; the compiled `typst` crate is
+part of the public API, so upgrading Typst is a breaking change.
+
+| `typst-template` | `typst` |
+| ---------------- | ------- |
+| 0.2.x            | 0.15    |
+| 0.1.x            | 0.14    |
+
 ## License
 
 MIT

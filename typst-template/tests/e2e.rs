@@ -34,10 +34,10 @@ fn inputs_reach_the_rendered_document() {
 
     // Compile and inspect the laid-out document.
     let document = world.compile().output.expect("document compiles");
-    assert_eq!(document.pages.len(), 1);
+    assert_eq!(document.pages().len(), 1);
 
     let mut text = String::new();
-    for page in &document.pages {
+    for page in document.pages() {
         collect_text(&page.frame, &mut text);
     }
     assert!(text.contains("ACME"), "client name missing from rendered text: {text:?}");

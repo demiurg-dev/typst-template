@@ -7,16 +7,17 @@ authors = ["Demiurg <developers@demiurg.hr>"]
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/demiurg-dev/typst-template"
-version = "0.1.1"
+version = "0.2.0"
 
 [workspace.dependencies]
 # Internal
-typst-template-derive = { version = "0.1.1", path = "typst-template-derive" }
+typst-template-derive = { version = "0.2.0", path = "typst-template-derive" }
 
 # Typst
-typst = "0.14"
-typst-kit = { version = "0.14", default-features = false, features = ["embed-fonts", "fonts"] }
-typst-pdf = "0.14"
+typst = "0.15"
+typst-kit = { version = "0.15", default-features = false, features = ["embedded-fonts", "scan-fonts"] }
+typst-layout = "0.15"
+typst-pdf = "0.15"
 
 # Proc-macro
 darling = "0.20"

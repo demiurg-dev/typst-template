@@ -82,6 +82,12 @@
 //! - `rust_decimal` — [`ToValue`] for `rust_decimal::Decimal`.
 //! - `serde_json` — [`ToValue`]/[`ToDict`] for `serde_json` values.
 //! - `uuid` — [`ToValue`] for `uuid::Uuid`.
+//!
+//! # Typst compatibility
+//!
+//! This release targets **Typst 0.15**. The re-exported [`typst`] crate is part
+//! of the public API, so moving to a new Typst version is a breaking change; see
+//! the README for the version compatibility table.
 
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![forbid(unsafe_code)]
@@ -165,4 +171,4 @@ pub use world::{ConcreteWorld, ConcreteWorldBuilder, WorldBase, WorldBaseConfig}
 // Re-export the Typst crates and the handful of types that appear in this
 // crate's public API, so downstream users don't need to depend on them
 // directly or match versions by hand.
-pub use {typst, typst_pdf};
+pub use {typst, typst_layout, typst_pdf};
