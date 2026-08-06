@@ -12,7 +12,16 @@
 # The DoS requires parsing attacker-crafted XML, which this crate never does —
 # it renders PDFs from trusted templates and Rust data. Revisit (and remove
 # these entries) once `citationberg` ships a `quick-xml` 0.41 release.
+#
+# `rkyv` <0.8.17 (out-of-bounds reads on malformed archives) is an *optional*
+# dependency of `rust_decimal` that we never enable — its `rkyv` feature stays
+# off, so the crate is only in `Cargo.lock`, never compiled into any build
+# (`cargo tree` resolves nothing to it). `rust_decimal` still pins its optional
+# `rkyv` to `^0.7`, so we can't move to the fixed 0.8.17. Revisit once
+# `rust_decimal` updates that dependency (or if we ever enable its `rkyv`
+# feature).
 ignore = [
     "RUSTSEC-2026-0194", # quick-xml <0.41: quadratic CPU on duplicate attribute names
     "RUSTSEC-2026-0195", # quick-xml <0.41: unbounded namespace-declaration allocation
+    "RUSTSEC-2026-0235", # rkyv <0.8.17: OOB reads — unactivated optional dep of rust_decimal
 ]
