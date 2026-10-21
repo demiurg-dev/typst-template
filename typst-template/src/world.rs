@@ -3,7 +3,8 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::SystemTime;
 use std::{fmt, fs};
 
 use typst::diag::{FileError, FileResult, SourceResult, Warned};
@@ -20,9 +21,13 @@ use crate::value::{ToDict, ToValue};
 
 /// A long-lived, cheaply cloneable Typst world.
 ///
-/// Holds the project root and the loaded font set. Build a `WorldBase` once and
-/// derive a [`ConcreteWorld`] from it for each document via
-/// [`concrete`](Self::concrete). Cloning shares the fonts through an [`Arc`].
+/// Holds the project root, the loaded font set, and the files read from the
+/// root. Build a `WorldBase` once and derive a [`ConcreteWorld`] from it for
+/// each document via [`concrete`](Self::concrete). Cloning shares the fonts and
+/// the files through an [`Arc`].
+///
+/// A file read from the root is kept, parsed when it is a source, until its
+/// modification time or length changes.
 #[derive(Clone)]
 #[must_use]
 pub struct WorldBase {
@@ -32,6 +37,21 @@ pub struct WorldBase {
 struct WorldBaseInner {
     root: PathBuf,
     fonts: FontStore,
+    cache: Mutex<HashMap<FileId, Cached>>,
+}
+
+/// A file read from the root, and its source once parsed.
+struct Cached {
+    stamp: Stamp,
+    bytes: Bytes,
+    source: Option<FileResult<Source>>,
+}
+
+/// What tells that a file changed on disk.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Stamp {
+    modified: SystemTime,
+    len: u64,
 }
 
 impl fmt::Debug for WorldBase {
@@ -98,7 +118,7 @@ impl WorldBaseConfig {
         if self.embedded_fonts {
             store.extend(fonts::embedded());
         }
-        let inner = WorldBaseInner { root: self.root, fonts: store };
+        let inner = WorldBaseInner { root: self.root, fonts: store, cache: Mutex::default() };
         WorldBase { inner: Arc::new(inner) }
     }
 }
@@ -126,20 +146,85 @@ impl WorldBase {
 }
 
 impl WorldBaseInner {
-    fn load_file(&self, id: FileId) -> FileResult<Vec<u8>> {
+    /// The file `id` under the root, read again only when it changed.
+    fn file(&self, id: FileId) -> FileResult<Bytes> {
+        let (path, stamp) = self.stamp(id)?;
+        if let Some(cached) = self.cache().get(&id).filter(|c| Some(c.stamp) == stamp) {
+            return Ok(cached.bytes.clone());
+        }
+        let bytes = read(&path)?;
+        self.keep(id, stamp, bytes.clone(), None);
+        Ok(bytes)
+    }
+
+    /// The file `id` under the root as a source, parsed again only when it
+    /// changed, and then in place.
+    fn source(&self, id: FileId) -> FileResult<Source> {
+        let (path, stamp) = self.stamp(id)?;
+        let (fresh, stale) = match self.cache().get(&id) {
+            Some(cached) if Some(cached.stamp) == stamp => match &cached.source {
+                Some(source) => return source.clone(),
+                None => (Some(cached.bytes.clone()), None),
+            },
+            Some(cached) => (None, cached.source.clone().and_then(Result::ok)),
+            None => (None, None),
+        };
+        let bytes = match fresh {
+            Some(bytes) => bytes,
+            None => read(&path)?,
+        };
+        let source = parse(id, &bytes, stale);
+        self.keep(id, stamp, bytes, Some(source.clone()));
+        source
+    }
+
+    /// Where `id` is on disk, and its stamp; `None` when the file system keeps
+    /// no modification time, so the file is never kept.
+    fn stamp(&self, id: FileId) -> FileResult<(PathBuf, Option<Stamp>)> {
         let path = id
             .vpath()
             .realize(&self.root)
             .map_err(|_| FileError::AccessDenied)?;
-        // TODO: Cache reads in the base and re-validate against mtime on the
-        // next request. See TODO.md ("Disk file read cache").
-        fs::read(&path).map_err(|err| match err.kind() {
-            std::io::ErrorKind::NotFound => FileError::NotFound(path),
-            std::io::ErrorKind::PermissionDenied => FileError::AccessDenied,
-            std::io::ErrorKind::IsADirectory => FileError::IsDirectory,
-            _ => FileError::Other(Some(format!("{err}").into())),
-        })
+        let metadata = fs::metadata(&path).map_err(|err| FileError::from_io(err, &path))?;
+        if metadata.is_dir() {
+            return Err(FileError::IsDirectory);
+        }
+        let stamp = metadata
+            .modified()
+            .ok()
+            .map(|modified| Stamp { modified, len: metadata.len() });
+        Ok((path, stamp))
     }
+
+    fn keep(&self, id: FileId, stamp: Option<Stamp>, bytes: Bytes, source: Option<FileResult<Source>>) {
+        if let Some(stamp) = stamp {
+            self.cache().insert(id, Cached { stamp, bytes, source });
+        }
+    }
+
+    fn cache(&self) -> MutexGuard<'_, HashMap<FileId, Cached>> {
+        // Every entry is whole, so a panic elsewhere leaves nothing to repair.
+        self.cache.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+fn read(path: &Path) -> FileResult<Bytes> {
+    fs::read(path)
+        .map(Bytes::new)
+        .map_err(|err| FileError::from_io(err, path))
+}
+
+/// `bytes` as the source of `id`, editing `stale` when there is one so that
+/// what did not change keeps its identity.
+fn parse(id: FileId, bytes: &Bytes, stale: Option<Source>) -> FileResult<Source> {
+    let text = std::str::from_utf8(bytes).map_err(|_| FileError::InvalidUtf8)?;
+    Ok(match stale {
+        Some(mut source) => {
+            source.replace(text);
+            source
+        }
+        None => Source::new(id, text.to_owned()),
+    })
 }
 
 /// Builder for a [`ConcreteWorld`].
@@ -286,7 +371,7 @@ impl ConcreteWorld {
     fn read(&self, id: FileId) -> FileResult<Bytes> {
         match self.files.get(&id) {
             Some(bytes) => Ok(bytes.clone()),
-            None => Ok(Bytes::new(self.base.load_file(id)?)),
+            None => self.base.file(id),
         }
     }
 }
@@ -305,9 +390,10 @@ impl World for ConcreteWorld {
     }
 
     fn source(&self, id: FileId) -> FileResult<Source> {
-        let bytes = self.read(id)?;
-        let text = std::str::from_utf8(&bytes).map_err(|_| FileError::InvalidUtf8)?;
-        Ok(Source::new(id, text.to_owned()))
+        match self.files.get(&id) {
+            Some(bytes) => parse(id, bytes, None),
+            None => self.base.source(id),
+        }
     }
 
     fn file(&self, id: FileId) -> FileResult<Bytes> {

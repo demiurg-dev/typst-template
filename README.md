@@ -13,6 +13,8 @@ conversion, with optional `chrono`, `time`, `rust_decimal`, `serde_json`, and
 Rendering uses two parts:
 
 - **`WorldBase`** — built once; loads fonts and roots file access at a directory.
+  Files read from that directory are cached, parsed templates included, and
+  read again when their modification time or length changes.
 - **`ConcreteWorld`** — one per document; attaches this generation's `sys.inputs`
   and any virtual in-memory files (images, generated assets, …).
 
