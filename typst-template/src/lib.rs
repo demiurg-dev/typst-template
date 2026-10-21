@@ -11,8 +11,9 @@
 //! - [`WorldBase`] — built once; loads fonts and roots file access at a directory. Files read from
 //!   that directory are cached, parsed templates included, and read again when their modification
 //!   time or length changes.
-//! - [`ConcreteWorld`] — one per document; attaches this generation's `sys.inputs` and any virtual
-//!   in-memory files (images, generated assets, …).
+//! - [`ConcreteWorld`] — one per document; attaches this generation's `sys.inputs`, any virtual
+//!   in-memory files (images, generated assets, …), and resolvers serving the files below a path
+//!   ([`mount`](ConcreteWorldBuilder::mount)).
 //!
 //! # Example
 //!
@@ -118,8 +119,8 @@ pub use chrono_tz;
 #[cfg(feature = "time-tz")]
 #[cfg_attr(docsrs, doc(cfg(feature = "time-tz")))]
 pub use time_tz;
-pub use typst::diag::{SourceDiagnostic, SourceResult, Warned};
-pub use typst::foundations::{Dict, Str, Value};
+pub use typst::diag::{FileError, FileResult, SourceDiagnostic, SourceResult, Warned};
+pub use typst::foundations::{Bytes, Dict, Str, Value};
 pub use typst_pdf::PdfOptions;
 /// Derives [`ToDict`](trait@ToDict) (and, through it, [`ToValue`]) for a named
 /// struct. See the [derive crate](typst_template_derive::ToDict) for the full list
@@ -169,7 +170,7 @@ pub use value::{ToDict, ToValue};
 #[cfg(any(feature = "chrono-tz", feature = "time-tz"))]
 #[cfg_attr(docsrs, doc(cfg(any(feature = "chrono-tz", feature = "time-tz"))))]
 pub use world::Zone;
-pub use world::{ConcreteWorld, ConcreteWorldBuilder, WorldBase, WorldBaseConfig};
+pub use world::{ConcreteWorld, ConcreteWorldBuilder, FileResolver, WorldBase, WorldBaseConfig};
 // Re-export the Typst crates and the handful of types that appear in this
 // crate's public API, so downstream users don't need to depend on them
 // directly or match versions by hand.
