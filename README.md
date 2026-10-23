@@ -13,8 +13,11 @@ conversion, with optional `chrono`, `time`, `rust_decimal`, `serde_json`, and
 Rendering uses two parts:
 
 - **`WorldBase`** — built once; loads fonts and roots file access at a directory.
-- **`ConcreteWorld`** — one per document; attaches this generation's `sys.inputs`
-  and any virtual in-memory files (images, generated assets, …).
+  Files read from that directory are cached, parsed templates included, and
+  read again when their modification time or length changes.
+- **`ConcreteWorld`** — one per document; attaches this generation's `sys.inputs`,
+  any virtual in-memory files (images, generated assets, …), and resolvers
+  serving the files below a path.
 
 ## Example
 
@@ -42,6 +45,29 @@ assert_eq!(&pdf[..4], b"%PDF");
 
 `compile()` and `render_pdf()` return Typst's native `Warned<SourceResult<…>>` —
 warnings plus errors, with full diagnostics (spans, hints).
+
+## Files from elsewhere
+
+A concrete world can serve the files below a path from a resolver of your own,
+such as files kept in a database, beside the base's directory:
+
+```rust
+use typst_template::{Bytes, FileError, WorldBaseConfig};
+
+let base = WorldBaseConfig::new("path/to/template").build();
+let world = base
+    .concrete("main.typ")
+    .mount("/stored", |path: &str| match path {
+        "logo.svg" => Ok(Bytes::new(load_logo())),
+        _ => Err(FileError::NotFound(path.into())),
+    })
+    .build();
+```
+
+The template then reads `#image("/stored/logo.svg")`. The resolver is given the
+path below the mount. Where mounts nest, the innermost answers; virtual files
+added with `.file` come before any mount. A world asks for each file once and
+keeps the answer.
 
 ## Derive attributes
 

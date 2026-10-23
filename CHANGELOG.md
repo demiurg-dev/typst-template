@@ -4,6 +4,24 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `ConcreteWorldBuilder::mount` serves the files below a path from a
+  `FileResolver` of your own, such as files kept in a database; any
+  `Fn(&str) -> FileResult<Bytes>` is one. A world asks a resolver for each
+  file once.
+- `Bytes`, `FileError` and `FileResult` are re-exported for resolvers.
+
+### Changed
+
+- Files read from a `WorldBase`'s root are cached in the base, Typst sources
+  parsed, and shared by every `ConcreteWorld` built from it. A file is read
+  again when its modification time or length changes; a changed source is
+  reparsed in place.
+- A concrete world parses each of its virtual sources once.
+
 ## [0.2.0]
 
 ### Changed

@@ -1,22 +1,5 @@
 # TODO
 
-## Disk file read cache
-
-Nothing is cached today. `WorldBaseInner::load_file` reads from disk on every
-request, and `World::source` rebuilds (re-reads, re-validates UTF-8, re-parses)
-a `Source` on every call — even for repeated requests within a single compile.
-Typst's `World` contract expects loading methods to cache, and `Source` carries
-incremental-parse identity, so this also defeats incremental reuse across
-compiles of a long-lived `WorldBase`.
-
-Idea: cache both raw bytes and parsed `Source` in the `WorldBase`, keyed by
-`FileId`, and re-validate against the file's modification time on the next
-request (re-read/re-parse only when it changed).
-
-Open questions: cache size/eviction model; invalidation via mtime vs. explicit;
-interior mutability for the shared (`Clone`) base without hurting the read path;
-whether virtual in-memory files participate in the same cache.
-
 ## Typst package support
 
 Imports like `#import "@preview/cetz:0.3.4"` give a `FileId` with

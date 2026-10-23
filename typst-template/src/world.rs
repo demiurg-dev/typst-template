@@ -3,7 +3,8 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::SystemTime;
 use std::{fmt, fs};
 
 use typst::diag::{FileError, FileResult, SourceResult, Warned};
@@ -20,9 +21,13 @@ use crate::value::{ToDict, ToValue};
 
 /// A long-lived, cheaply cloneable Typst world.
 ///
-/// Holds the project root and the loaded font set. Build a `WorldBase` once and
-/// derive a [`ConcreteWorld`] from it for each document via
-/// [`concrete`](Self::concrete). Cloning shares the fonts through an [`Arc`].
+/// Holds the project root, the loaded font set, and the files read from the
+/// root. Build a `WorldBase` once and derive a [`ConcreteWorld`] from it for
+/// each document via [`concrete`](Self::concrete). Cloning shares the fonts and
+/// the files through an [`Arc`].
+///
+/// A file read from the root is kept, parsed when it is a source, until its
+/// modification time or length changes.
 #[derive(Clone)]
 #[must_use]
 pub struct WorldBase {
@@ -32,6 +37,21 @@ pub struct WorldBase {
 struct WorldBaseInner {
     root: PathBuf,
     fonts: FontStore,
+    cache: Mutex<HashMap<FileId, Cached>>,
+}
+
+/// A file read from the root, and its source once parsed.
+struct Cached {
+    stamp: Stamp,
+    bytes: Bytes,
+    source: Option<FileResult<Source>>,
+}
+
+/// What tells that a file changed on disk.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Stamp {
+    modified: SystemTime,
+    len: u64,
 }
 
 impl fmt::Debug for WorldBase {
@@ -98,7 +118,7 @@ impl WorldBaseConfig {
         if self.embedded_fonts {
             store.extend(fonts::embedded());
         }
-        let inner = WorldBaseInner { root: self.root, fonts: store };
+        let inner = WorldBaseInner { root: self.root, fonts: store, cache: Mutex::default() };
         WorldBase { inner: Arc::new(inner) }
     }
 }
@@ -120,26 +140,112 @@ impl WorldBase {
             main: file_id(main),
             inputs: Dict::new(),
             files: HashMap::new(),
+            mounts: Vec::new(),
             today: Today::default(),
         }
     }
 }
 
+/// Supplies the files below a path of a [`ConcreteWorld`], such as files kept
+/// in a database.
+///
+/// Mount one with [`ConcreteWorldBuilder::mount`]. Any
+/// `Fn(&str) -> FileResult<Bytes>` taking the path below the mount is one.
+pub trait FileResolver: Send + Sync {
+    /// The file at `path` below the mount: `/`-separated, without a leading
+    /// slash.
+    fn resolve(&self, path: &str) -> FileResult<Bytes>;
+}
+
+impl<F> FileResolver for F
+where
+    F: Fn(&str) -> FileResult<Bytes> + Send + Sync,
+{
+    fn resolve(&self, path: &str) -> FileResult<Bytes> {
+        self(path)
+    }
+}
+
 impl WorldBaseInner {
-    fn load_file(&self, id: FileId) -> FileResult<Vec<u8>> {
+    /// The file `id` under the root, read again only when it changed.
+    fn file(&self, id: FileId) -> FileResult<Bytes> {
+        let (path, stamp) = self.stamp(id)?;
+        if let Some(cached) = self.cache().get(&id).filter(|c| Some(c.stamp) == stamp) {
+            return Ok(cached.bytes.clone());
+        }
+        let bytes = read(&path)?;
+        self.keep(id, stamp, bytes.clone(), None);
+        Ok(bytes)
+    }
+
+    /// The file `id` under the root as a source, parsed again only when it
+    /// changed, and then in place.
+    fn source(&self, id: FileId) -> FileResult<Source> {
+        let (path, stamp) = self.stamp(id)?;
+        let (fresh, stale) = match self.cache().get(&id) {
+            Some(cached) if Some(cached.stamp) == stamp => match &cached.source {
+                Some(source) => return source.clone(),
+                None => (Some(cached.bytes.clone()), None),
+            },
+            Some(cached) => (None, cached.source.clone().and_then(Result::ok)),
+            None => (None, None),
+        };
+        let bytes = match fresh {
+            Some(bytes) => bytes,
+            None => read(&path)?,
+        };
+        let source = parse(id, &bytes, stale);
+        self.keep(id, stamp, bytes, Some(source.clone()));
+        source
+    }
+
+    /// Where `id` is on disk, and its stamp; `None` when the file system keeps
+    /// no modification time, so the file is never kept.
+    fn stamp(&self, id: FileId) -> FileResult<(PathBuf, Option<Stamp>)> {
         let path = id
             .vpath()
             .realize(&self.root)
             .map_err(|_| FileError::AccessDenied)?;
-        // TODO: Cache reads in the base and re-validate against mtime on the
-        // next request. See TODO.md ("Disk file read cache").
-        fs::read(&path).map_err(|err| match err.kind() {
-            std::io::ErrorKind::NotFound => FileError::NotFound(path),
-            std::io::ErrorKind::PermissionDenied => FileError::AccessDenied,
-            std::io::ErrorKind::IsADirectory => FileError::IsDirectory,
-            _ => FileError::Other(Some(format!("{err}").into())),
-        })
+        let metadata = fs::metadata(&path).map_err(|err| FileError::from_io(err, &path))?;
+        if metadata.is_dir() {
+            return Err(FileError::IsDirectory);
+        }
+        let stamp = metadata
+            .modified()
+            .ok()
+            .map(|modified| Stamp { modified, len: metadata.len() });
+        Ok((path, stamp))
     }
+
+    fn keep(&self, id: FileId, stamp: Option<Stamp>, bytes: Bytes, source: Option<FileResult<Source>>) {
+        if let Some(stamp) = stamp {
+            self.cache().insert(id, Cached { stamp, bytes, source });
+        }
+    }
+
+    fn cache(&self) -> MutexGuard<'_, HashMap<FileId, Cached>> {
+        // Every entry is whole, so a panic elsewhere leaves nothing to repair.
+        self.cache.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+fn read(path: &Path) -> FileResult<Bytes> {
+    fs::read(path)
+        .map(Bytes::new)
+        .map_err(|err| FileError::from_io(err, path))
+}
+
+/// `bytes` as the source of `id`, editing `stale` when there is one so that
+/// what did not change keeps its identity.
+fn parse(id: FileId, bytes: &Bytes, stale: Option<Source>) -> FileResult<Source> {
+    let text = std::str::from_utf8(bytes).map_err(|_| FileError::InvalidUtf8)?;
+    Ok(match stale {
+        Some(mut source) => {
+            source.replace(text);
+            source
+        }
+        None => Source::new(id, text.to_owned()),
+    })
 }
 
 /// Builder for a [`ConcreteWorld`].
@@ -150,6 +256,7 @@ pub struct ConcreteWorldBuilder {
     main: FileId,
     inputs: Dict,
     files: HashMap<FileId, Bytes>,
+    mounts: Vec<(String, Arc<dyn FileResolver>)>,
     today: Today,
 }
 
@@ -179,6 +286,34 @@ impl ConcreteWorldBuilder {
     /// of any real file at that path.
     pub fn file(mut self, path: impl AsRef<Path>, content: impl Into<Vec<u8>>) -> Self {
         self.files.insert(file_id(path), Bytes::new(content.into()));
+        self
+    }
+
+    /// Serves the files below `path` from `resolver` instead of the base's
+    /// root. Where mounts nest, the innermost answers; mounting a path again
+    /// replaces its resolver. Virtual files added with [`file`](Self::file)
+    /// come before any mount.
+    ///
+    /// The world asks the resolver for each file once and keeps the answer.
+    ///
+    /// ```
+    /// use typst_template::{Bytes, FileError, WorldBaseConfig};
+    ///
+    /// let logo = r#"<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"/>"#;
+    /// let base = WorldBaseConfig::new(".").system_fonts(false).build();
+    /// let world = base
+    ///     .concrete("main.typ")
+    ///     .file("main.typ", r#"#image("/stored/logo.svg")"#)
+    ///     .mount("/stored", move |path: &str| match path {
+    ///         "logo.svg" => Ok(Bytes::from_string(logo)),
+    ///         _ => Err(FileError::NotFound(path.into())),
+    ///     })
+    ///     .build();
+    ///
+    /// assert!(world.render_pdf_default().output.is_ok());
+    /// ```
+    pub fn mount(mut self, path: impl AsRef<Path>, resolver: impl FileResolver + 'static) -> Self {
+        self.mounts.push((normalized(path), Arc::new(resolver)));
         self
     }
 
@@ -230,6 +365,8 @@ impl ConcreteWorldBuilder {
             base: self.base.inner,
             library: LazyHash::new(library),
             files: self.files,
+            mounts: self.mounts,
+            given: Mutex::default(),
             main: self.main,
             today: self.today,
         }
@@ -246,8 +383,18 @@ pub struct ConcreteWorld {
     base: Arc<WorldBaseInner>,
     library: LazyHash<Library>,
     files: HashMap<FileId, Bytes>,
+    mounts: Vec<(String, Arc<dyn FileResolver>)>,
+    given: Mutex<HashMap<FileId, Given>>,
     main: FileId,
     today: Today,
+}
+
+/// What a world gave for a virtual or mounted file, so that it gives the same
+/// again without asking or parsing anew.
+#[derive(Default)]
+struct Given {
+    file: Option<FileResult<Bytes>>,
+    source: Option<FileResult<Source>>,
 }
 
 impl fmt::Debug for ConcreteWorld {
@@ -261,7 +408,12 @@ impl fmt::Debug for ConcreteWorld {
 impl ConcreteWorld {
     /// Adds (or replaces) a virtual in-memory file after construction.
     pub fn add_file(&mut self, path: impl AsRef<Path>, content: impl Into<Vec<u8>>) {
-        self.files.insert(file_id(path), Bytes::new(content.into()));
+        let id = file_id(path);
+        self.files.insert(id, Bytes::new(content.into()));
+        self.given
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&id);
     }
 
     /// Compiles the document, returning the paged document (or errors) together
@@ -284,10 +436,46 @@ impl ConcreteWorld {
     }
 
     fn read(&self, id: FileId) -> FileResult<Bytes> {
-        match self.files.get(&id) {
-            Some(bytes) => Ok(bytes.clone()),
-            None => Ok(Bytes::new(self.base.load_file(id)?)),
+        if let Some(bytes) = self.files.get(&id) {
+            return Ok(bytes.clone());
         }
+        match self.mounted(id) {
+            Some((resolver, path)) => self.given(id, |g| &mut g.file, || resolver.resolve(path)),
+            None => self.base.file(id),
+        }
+    }
+
+    /// The resolver of the innermost mount `id` is below, and its path there.
+    fn mounted(&self, id: FileId) -> Option<(&dyn FileResolver, &'static str)> {
+        let rooted = id.get();
+        if !matches!(rooted.root(), VirtualRoot::Project) {
+            return None;
+        }
+        let path = rooted.vpath().get_without_slash();
+        self.mounts
+            .iter()
+            .filter_map(|(at, resolver)| Some((at.len(), &**resolver, below(at, path)?)))
+            .max_by_key(|(len, ..)| *len)
+            .map(|(_, resolver, rest)| (resolver, rest))
+    }
+
+    /// What the world gave for `id` in `slot`, or else `make`'s answer, kept.
+    fn given<T: Clone>(
+        &self,
+        id: FileId,
+        slot: fn(&mut Given) -> &mut Option<FileResult<T>>,
+        make: impl FnOnce() -> FileResult<T>,
+    ) -> FileResult<T> {
+        let memo = || self.given.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(given) = slot(memo().entry(id).or_default()) {
+            return given.clone();
+        }
+        // Made without the lock: a resolver may be slow, and a source asks
+        // for its file.
+        let made = make();
+        slot(memo().entry(id).or_default())
+            .get_or_insert(made)
+            .clone()
     }
 }
 
@@ -305,9 +493,11 @@ impl World for ConcreteWorld {
     }
 
     fn source(&self, id: FileId) -> FileResult<Source> {
-        let bytes = self.read(id)?;
-        let text = std::str::from_utf8(&bytes).map_err(|_| FileError::InvalidUtf8)?;
-        Ok(Source::new(id, text.to_owned()))
+        if self.files.contains_key(&id) || self.mounted(id).is_some() {
+            self.given(id, |g| &mut g.source, || parse(id, &self.read(id)?, None))
+        } else {
+            self.base.source(id)
+        }
     }
 
     fn file(&self, id: FileId) -> FileResult<Bytes> {
@@ -509,6 +699,14 @@ fn offset_now(secs: i64) -> Option<Datetime> {
 // Windows work) and resolve `.`/`..` so a stray `..` clamps at the root instead
 // of erroring.
 fn file_id(path: impl AsRef<Path>) -> FileId {
+    // Only normal segments remain, so this cannot escape the root or hit a
+    // backslash — the two ways `VirtualPath::new` can fail.
+    let vpath = VirtualPath::new(normalized(path)).expect("normalized path is a valid vpath");
+    FileId::new(RootedPath::new(VirtualRoot::Project, vpath))
+}
+
+/// `path` as `/`-separated normal segments, without a leading slash.
+fn normalized(path: impl AsRef<Path>) -> String {
     let raw = path.as_ref().to_string_lossy();
     let mut segments: Vec<&str> = Vec::new();
     for segment in raw.split(['/', '\\']) {
@@ -520,8 +718,13 @@ fn file_id(path: impl AsRef<Path>) -> FileId {
             normal => segments.push(normal),
         }
     }
-    // Only normal segments remain, so this cannot escape the root or hit a
-    // backslash — the two ways `VirtualPath::new` can fail.
-    let vpath = VirtualPath::new(segments.join("/")).expect("normalized path is a valid vpath");
-    FileId::new(RootedPath::new(VirtualRoot::Project, vpath))
+    segments.join("/")
+}
+
+/// The path below `mount` that `path` is, segment by segment.
+fn below<'p>(mount: &str, path: &'p str) -> Option<&'p str> {
+    if mount.is_empty() {
+        return Some(path);
+    }
+    path.strip_prefix(mount)?.strip_prefix('/')
 }
